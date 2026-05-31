@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Registro Himenópteros</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2D5A3D">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Himenópteros">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+
+// ============================================================
+// Minimal XLSX exporter — pure JS, zero dependencies
+// Builds a real .xlsx (ZIP+XML) file in the browser
+// ============================================================
+(function(global){
+
+// ---- tiny CRC32 ----
+const crcTable=(()=>{const t=new Uint32Array(256);for(let i=0;i<256;i++){let c=i;for(let j=0;j<8;j++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[i]=c;}return t;})();
+function crc32(buf,off=0,len=buf.length){let c=0xFFFFFFFF;for(let i=off;i<off+len;i++)c=crcTable[(c^buf[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;}
+
+function strBytes(s){const e=new TextEncoder();return e.encode(s);}
+function u16le(n){return[n&0xFF,(n>>8)&0xFF];}
+function u32le(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
+function concat(...arrs){const total=arrs.reduce((s,a)=>s+a.length,0);const out=new Uint8Array(total);let off=0;for(const a of arrs){out.set(a,off);off+=a.length;}return out;}
+
+function deflateRaw(data){
+  // Use DecompressionStream trick to get deflate — not available everywhere.
+  // Use store (no compression) for simplicity and reliability.
+  return {data, method:0, crc:crc32(data)};
+}
+
+function zipEntry(name,content){
+  const nameB=strBytes(name);
+  const {data, method, crc}=deflateRaw(content);
+  const local=concat(
+    new Uint8Array([0x50,0x4B,0x03,0x04]), // sig
+    new Uint8Array([0x14,0x00]),             // version
+    new Uint8Array([0x00,0x00]),             // flags
+    new Uint8Array(u16le(method)),           // method: store
+    new Uint8Array([0x00,0x00,0x00,0x00]),   // mod time/date
+    new Uint8Array(u32le(crc)),
+    new Uint8Array(u32le(data.length)),
+    new Uint8Array(u32le(data.length)),
+    new Uint8Array(u16le(nameB.length)),
+    new Uint8Array([0x00,0x00]),             // extra len
+    nameB, data
+  );
+  return {local, nameB, method, crc, size:data.length, compSize:data.length};
+}
+
+function buildZip(files){
+  const entries=[]; let offset=0; const parts=[];
+  for(const [name,content] of files){
+    const e=zipEntry(name,content);
+    e.offset=offset;
+    entries.push(e);
+    parts.push(e.local);
+    offset+=e.local.length;
+  }
+  const cdParts=[]; let cdSize=0;
+  for(const e of entries){
+    const cd=concat(
+      new Uint8Array([0x50,0x4B,0x01,0x02]),
+      new Uint8Array([0x14,0x00,0x14,0x00]),
+      new Uint8Array([0x00,0x00]),
+      new Uint8Array(u16le(e.method)),
+      new Uint8Array([0x00,0x00,0x00,0x00]),
+      new Uint8Array(u32le(e.crc)),
+      new Uint8Array(u32le(e.compSize)),
+      new Uint8Array(u32le(e.size)),
+      new Uint8Array(u16le(e.nameB.length)),
+      new Uint8Array(10), // extra+comment+disk+attr
+      new Uint8Array([0x00,0x00]),
+      new Uint8Array(u32le(e.offset)),
+      e.nameB
+    );
+    cdParts.push(cd); cdSize+=cd.length;
+  }
+  const eocd=concat(
+    new Uint8Array([0x50,0x4B,0x05,0x06]),
+    new Uint8Array(4),
+    new Uint8Array(u16le(entries.length)),
+    new Uint8Array(u16le(entries.length)),
+    new Uint8Array(u32le(cdSize)),
+    new Uint8Array(u32le(offset)),
+    new Uint8Array([0x00,0x00])
+  );
+  return concat(...parts,...cdParts,eocd);
+}
+
+// ---- XML helpers ----
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function buildXlsx(sheetsData){
+  // sheetsData = [{name, rows:[{cells:[{v,t}]}]}]
+  // t: 's'=string, 'n'=number, 'b'=bold header
+
+  // Shared strings
+  const sst=[]; const sstMap={};
+  function getSST(s){const k=String(s??'');if(sstMap[k]===undefined){sstMap[k]=sst.length;sst.push(k);}return sstMap[k];}
+
+  // Pre-scan strings
+  for(const sh of sheetsData)
+    for(const row of sh.rows)
+      for(const cell of row.cells)
+        if(cell.t!=='n'&&cell.v!==undefined&&cell.v!=='') getSST(cell.v);
+
+  const sstXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sst.length}" uniqueCount="${sst.length}">
+${sst.map(s=>`<si><t xml:space="preserve">${esc(s)}</t></si>`).join('\n')}
+</sst>`;
+
+  // Styles (minimal: 0=normal, 1=bold header, 2=date)
+  const stylesXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="9"/><name val="Arial"/></font>
+    <font><b/><sz val="9"/><name val="Arial"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF2D5A3D"/></patternFill></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0"><alignment horizontal="center"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>
+  </cellXfs>
+</styleSheet>`;
+
+  function colLetter(n){let s='';n++;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
+
+  const sheetXmls=[];
+  for(const sh of sheetsData){
+    let xml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>`;
+    sh.rows.forEach((row,ri)=>{
+      xml+=`<row r="${ri+1}">`;
+      row.cells.forEach((cell,ci)=>{
+        const ref=colLetter(ci)+(ri+1);
+        const s=cell.t==='h'?1:(cell.t==='b'?2:0);
+        if(cell.v===undefined||cell.v===''){xml+=`<c r="${ref}" s="${s}"/>`;return;}
+        if(cell.t==='n'||(!isNaN(cell.v)&&cell.v!=='')){
+          xml+=`<c r="${ref}" t="n" s="${s}"><v>${esc(cell.v)}</v></c>`;
+        } else {
+          const idx=getSST(cell.v);
+          xml+=`<c r="${ref}" t="s" s="${s}"><v>${idx}</v></c>`;
+        }
+      });
+      xml+=`</row>`;
+    });
+    xml+=`</sheetData></worksheet>`;
+    sheetXmls.push(xml);
+  }
+
+  const wbXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>
+${sheetsData.map((sh,i)=>`<sheet name="${esc(sh.name)}" sheetId="${i+1}" r:id="rId${i+2}"/>`).join('\n')}
+</sheets>
+</workbook>`;
+
+  const wbRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+  <Relationship Id="rId2000" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+${sheetsData.map((sh,i)=>`  <Relationship Id="rId${i+2}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`).join('\n')}
+</Relationships>`;
+
+  const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`;
+
+  const contentTypes=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+${sheetsData.map((sh,i)=>`  <Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n')}
+</Types>`;
+
+  const enc=s=>strBytes(s);
+  const files=[
+    ['[Content_Types].xml', enc(contentTypes)],
+    ['_rels/.rels', enc(rootRels)],
+    ['xl/workbook.xml', enc(wbXml)],
+    ['xl/_rels/workbook.xml.rels', enc(wbRels)],
+    ['xl/sharedStrings.xml', enc(sstXml)],
+    ['xl/styles.xml', enc(stylesXml)],
+    ...sheetXmls.map((x,i)=>[`xl/worksheets/sheet${i+1}.xml`, enc(x)])
+  ];
+  return buildZip(files);
+}
+
+global.buildXlsxFile = function(sheetsData){
+  const bytes=buildXlsx(sheetsData);
+  const blob=new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  return blob;
+};
+
+})(window);
+
+</script>
+<style>
+:root {
+  --green:#2D5A3D; --green2:#3D7A52; --green-pale:#E8F2EC;
+  --amber:#C9922A; --amber-pale:#FDF3E3;
+  --bg:#F4F1EB; --white:#FFFEF9; --border:#D5CDBF;
+  --text:#1A1710; --muted:#7A7060;
+  --red:#C0392B; --red-pale:#FDECEA;
+  --blue:#1A5276; --blue-pale:#EAF2FF;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);padding-bottom:90px}
+
+.header{background:var(--green);padding:18px 16px 0;position:sticky;top:0;z-index:100;box-shadow:0 2px 14px rgba(0,0,0,.2)}
+.header h1{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:800;color:#fff;display:flex;align-items:center;gap:8px}
+.header-sub{color:#a8c9b2;font-size:.7rem;margin-top:2px;letter-spacing:.05em}
+.tab-bar{display:flex;gap:6px;margin-top:12px}
+.tab{flex:1;background:rgba(255,255,255,.12);border:none;border-radius:8px 8px 0 0;color:rgba(255,255,255,.7);font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;padding:10px 6px;cursor:pointer;position:relative;transition:all .2s}
+.tab.active{background:#fff;color:var(--green)}
+.tab .badge{position:absolute;top:-4px;right:-4px;background:var(--amber);color:#fff;border-radius:10px;font-size:.6rem;font-weight:700;padding:1px 6px;min-width:18px;text-align:center}
+
+.page{display:none;padding:14px}
+.page.active{display:block}
+
+.form-card{background:var(--white);border-radius:14px;border:1.5px solid var(--border);overflow:hidden;margin-bottom:12px}
+.sec-hdr{color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.76rem;padding:9px 14px;letter-spacing:.06em;text-transform:uppercase;display:flex;align-items:center;gap:7px}
+.sec-hdr.green{background:var(--green)}
+.sec-hdr.green2{background:var(--green2)}
+.sec-hdr.amber{background:var(--amber)}
+.sec-hdr.dark{background:#1A2E22}
+.sec-hdr.blue{background:var(--blue)}
+.sec-hdr.brown{background:#4A2C0A}
+.sec-hdr.photo{background:#5D4037}
+
+.field{display:flex;flex-direction:column;padding:12px 14px;border-bottom:1px solid #EDE8DE}
+.field:last-child{border-bottom:none}
+.field label{font-size:.68rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+.field input,.field select,.field textarea{font-family:'Inter',sans-serif;font-size:1rem;color:var(--text);border:1.5px solid var(--border);border-radius:10px;padding:13px 14px;background:#FAF8F3;outline:none;width:100%;transition:border-color .2s,background .2s;-webkit-appearance:none;appearance:none}
+.field select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M0 0l6 8 6-8z' fill='%232d5a3d'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:40px}
+.field input:focus,.field select:focus{border-color:var(--green2);background:var(--green-pale)}
+.field.two-col{flex-direction:row;gap:10px}
+.field.two-col>div{flex:1;display:flex;flex-direction:column;gap:6px}
+.field.two-col>div label{font-size:.68rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+.autofill{background:var(--green-pale)!important;border-color:var(--green2)!important;color:var(--green)!important;font-weight:600!important}
+
+/* Photos */
+.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px 14px}
+.photo-thumb{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;border:1.5px solid var(--border);background:#f0ece0;cursor:pointer}
+.photo-thumb img{width:100%;height:100%;object-fit:cover}
+.photo-thumb .del-photo{position:absolute;top:4px;right:4px;background:rgba(192,57,43,.85);border:none;color:#fff;border-radius:6px;font-size:.7rem;font-weight:700;padding:2px 6px;cursor:pointer}
+.add-photo-btn{aspect-ratio:1;border-radius:10px;border:2px dashed var(--border);background:#faf8f3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;font-size:.72rem;color:var(--muted);font-weight:600;cursor:pointer;transition:all .2s}
+.add-photo-btn:active{background:var(--green-pale);border-color:var(--green2)}
+.add-photo-btn .icon{font-size:1.6rem}
+.photo-count{font-size:.72rem;color:var(--muted);padding:0 14px 10px;font-style:italic}
+
+.save-btn{width:100%;background:var(--green);color:#fff;font-family:'Syne',sans-serif;font-size:1rem;font-weight:800;border:none;border-radius:14px;padding:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;margin-top:6px;transition:all .2s;box-shadow:0 4px 16px rgba(45,90,61,.25);letter-spacing:.03em}
+.save-btn:active{transform:scale(.97);background:#234A31}
+.reset-btn{width:100%;background:transparent;color:var(--muted);font-family:'Inter',sans-serif;font-size:.84rem;font-weight:600;border:1.5px solid var(--border);border-radius:14px;padding:13px;cursor:pointer;margin-top:10px;transition:all .2s}
+.reset-btn:active{background:#EDE8DE}
+
+.records-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+.records-count{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;color:var(--green)}
+.export-btn{background:var(--amber);color:#fff;font-family:'Inter',sans-serif;font-size:.8rem;font-weight:700;border:none;border-radius:10px;padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:all .2s}
+.export-btn:active{transform:scale(.96)}
+
+.record-card{background:var(--white);border:1.5px solid var(--border);border-radius:14px;margin-bottom:10px;overflow:hidden}
+.record-head{background:var(--green-pale);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.record-num{font-family:'Syne',sans-serif;font-weight:800;font-size:.85rem;color:var(--green)}
+.record-date{font-size:.72rem;color:var(--muted);font-weight:500}
+.record-del{background:var(--red-pale);border:none;border-radius:8px;color:var(--red);font-size:.75rem;font-weight:700;padding:5px 10px;cursor:pointer;margin-left:auto}
+.record-body{padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px 12px}
+.rf{display:flex;flex-direction:column;gap:2px}
+.rl{font-size:.62rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.rv{font-size:.82rem;font-weight:500;color:var(--text)}
+.rv.sci{font-style:italic;color:var(--green)}
+.rv.empty{color:#C0B8A8;font-style:italic}
+.rf.full{grid-column:span 2}
+.rec-photos{display:flex;gap:6px;overflow-x:auto;padding:0 14px 12px}
+.rec-photo{width:56px;height:56px;border-radius:8px;object-fit:cover;border:1.5px solid var(--border);flex-shrink:0}
+
+.empty-state{text-align:center;padding:50px 20px;color:var(--muted)}
+.empty-state .icon{font-size:3rem;margin-bottom:12px}
+.empty-state p{font-size:.9rem;line-height:1.5}
+
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(120px);background:var(--green);color:#fff;font-family:'Inter',sans-serif;font-size:.88rem;font-weight:600;padding:13px 24px;border-radius:50px;white-space:nowrap;transition:transform .3s cubic-bezier(.34,1.56,.64,1);z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.2);pointer-events:none}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.bottom-bar{position:fixed;bottom:0;left:0;right:0;z-index:200;background:var(--white);border-top:2px solid var(--border);padding:10px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 -4px 20px rgba(0,0,0,.12)}
+.bottom-save{flex:1;background:var(--amber);color:#fff;font-family:'Syne',sans-serif;font-size:.95rem;font-weight:800;border:none;border-radius:12px;padding:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all .2s;letter-spacing:.02em;box-shadow:0 3px 12px rgba(201,146,42,.35)}
+.bottom-save:active{transform:scale(.97);background:#a87820}
+.bottom-count{background:var(--green-pale);border:1.5px solid var(--border);border-radius:12px;padding:10px 14px;text-align:center;min-width:68px;cursor:pointer}
+.bottom-count:active{background:var(--green-pale)}
+.bc-num{font-family:'Syne',sans-serif;font-weight:800;font-size:1.1rem;color:var(--green);line-height:1}
+.bc-lbl{font-size:.58rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
+</style>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('./service-worker.js')
+      .then(()=>console.log('SW registered'))
+      .catch(e=>console.log('SW error',e));
+  });
+}
+</script>
+</head>
+<body>
+<!-- PWA Install Banner -->
+<div id="install-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#C9922A;color:#fff;padding:12px 16px;font-family:'Inter',sans-serif;font-size:.85rem;font-weight:600;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.2)">
+  📲 Instala esta app en tu celular para usarla sin internet
+  <button onclick="installApp()" style="margin-left:10px;background:#fff;color:#C9922A;border:none;border-radius:8px;padding:6px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Instalar</button>
+  <button onclick="document.getElementById('install-banner').style.display='none'" style="margin-left:6px;background:transparent;border:none;color:rgba(255,255,255,.8);font-size:1rem;cursor:pointer">✕</button>
+</div>
+
+<div class="header">
+  <h1>🐝 Registro de Campo</h1>
+  <div class="header-sub">Himenópteros · Véspidos</div>
+  <div class="tab-bar">
+    <button class="tab active" onclick="showPage('form')">＋ Nuevo</button>
+    <button class="tab" onclick="showPage('records')" id="tab-rec">📋 Registros<span class="badge" id="badge" style="display:none">0</span></button>
+  </div>
+</div>
+
+<!-- FORM -->
+<div class="page active" id="page-form">
+
+  <div class="form-card">
+    <div class="sec-hdr green">📍 Información general</div>
+    <div class="field"><label>Fecha</label><input type="date" id="f-fecha"/></div>
+    <div class="field">
+      <label>Área de labores</label>
+      <select id="f-area">
+        <option value="">— Seleccionar —</option>
+        <option>Polígono 1</option>
+        <option>Polígono 2</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Cobertura</label>
+      <select id="f-cob">
+        <option value="">— Seleccionar —</option>
+        <option>Pastos arbolados</option>
+        <option>Boscoso</option>
+        <option>Antropizado</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-card">
+    <div class="sec-hdr blue">🧭 Coordenadas</div>
+    <div class="field two-col">
+      <div><label>Este</label><input type="number" id="f-este" placeholder="000000" inputmode="numeric"/></div>
+      <div><label>Norte</label><input type="number" id="f-norte" placeholder="000000" inputmode="numeric"/></div>
+    </div>
+  </div>
+
+  <div class="form-card">
+    <div class="sec-hdr amber">🔬 Taxonomía</div>
+    <div class="field">
+      <label>Especie (nombre científico)</label>
+      <select id="f-esp" onchange="onSpecies()">
+        <option value="">— Seleccionar especie —</option>
+      </select>
+    </div>
+    <div class="field"><label>Nombre común</label><input type="text" id="f-cn" placeholder="Automático" readonly/></div>
+    <div class="field"><label>Familia</label><input type="text" id="f-fam" placeholder="Automático" readonly/></div>
+  </div>
+
+  <div class="form-card">
+    <div class="sec-hdr dark">🌳 Árbol y estructura</div>
+    <div class="field"><label>ID Árbol</label><input type="text" id="f-arbol" placeholder="Ej: ARB-001, T-23..."/></div>
+    <div class="field">
+      <label>Estructura</label>
+      <select id="f-est">
+        <option value="">— Seleccionar —</option>
+        <option>Colmena</option>
+        <option>Enjambre</option>
+      </select>
+    </div>
+    <div class="field"><label>Abundancia</label><input type="number" id="f-abun" placeholder="0" inputmode="numeric" min="0"/></div>
+  </div>
+
+  <div class="form-card">
+    <div class="sec-hdr brown">📊 Estado y manejo</div>
+    <div class="field">
+      <label>Estado sanitario</label>
+      <select id="f-san">
+        <option value="">— Seleccionar —</option>
+        <option>Bueno</option>
+        <option>Regular</option>
+        <option>Malo</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Procedimiento de manejo</label>
+      <select id="f-proc">
+        <option value="">— Seleccionar —</option>
+        <option>Ahuyentamiento (AY)</option>
+        <option>Rescate (RE)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Método</label>
+      <select id="f-met">
+        <option value="">— Seleccionar —</option>
+        <option>Químico (Q)</option>
+        <option>Mecánico (M)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="form-card">
+    <div class="sec-hdr photo">📷 Fotos del registro</div>
+    <div class="photo-grid" id="photo-grid">
+      <div class="add-photo-btn" onclick="triggerPhoto()">
+        <span class="icon">📷</span>
+        <span>Agregar foto</span>
+      </div>
+    </div>
+    <div class="photo-count" id="photo-count"></div>
+    <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handlePhotos(event)"/>
+  </div>
+
+  <button class="save-btn" onclick="saveRecord()">✓ Guardar registro</button>
+  <button class="reset-btn" onclick="resetForm()">Limpiar formulario</button>
+</div>
+
+<!-- RECORDS -->
+<div class="page" id="page-records">
+  <div class="records-top">
+    <div class="records-count" id="rec-count">0 registros</div>
+    <button class="export-btn" onclick="exportXLSX()">⬇ Exportar Excel</button>
+  </div>
+  <div id="records-list"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SP = [
+  {sci:"Frieseomellitta nigra",       cn:"Mapaitero / Enrreda pelo",   fam:"Apidae"},
+  {sci:"Apis mellifera",              cn:"Abeja africana",              fam:"Apidae"},
+  {sci:"Tetragonisca angustula",      cn:"Abeja angelita",              fam:"Apidae"},
+  {sci:"Melipona favosa",             cn:"Abejas meliponas",            fam:"Apidae"},
+  {sci:"Geotrigona chiriquiensis",    cn:"Carga barro",                 fam:"Apidae"},
+  {sci:"Partamona musarum",           cn:"Abeja Terrera",               fam:"Apidae"},
+  {sci:"Polistes carnifex",           cn:"Carniceras",                  fam:"Eumeninae"},
+  {sci:"Polybia ignobilis",           cn:"Chamojo negro",               fam:"Eumeninae"},
+  {sci:"Polybia velutina",            cn:"Chamojo rojo",                fam:"Eumeninae"},
+  {sci:"Brachygastra lecheguana",     cn:"Canato",                      fam:"Vespidae"},
+  {sci:"Parachartergus colobopterus", cn:"Mea mea / Avispa Papelera",   fam:"Vespidae"},
+  {sci:"Apoica pallens",              cn:"Sombrerera",                  fam:"Vespidae"},
+  {sci:"Polybia occidentalis",        cn:"Angolito",                    fam:"Vespidae"},
+  {sci:"Mischocyttarus Sp.",          cn:"Pargatera",                   fam:"Vespidae"},
+];
+
+let records = [];
+let currentPhotos = []; // array of {dataUrl, name}
+
+try { records = JSON.parse(localStorage.getItem('himen_v2') || '[]'); } catch(e){}
+
+// Build species select
+const sel = document.getElementById('f-esp');
+SP.forEach((s,i)=>{
+  const o=document.createElement('option');
+  o.value=i; o.textContent=`${s.sci} · ${s.cn}`; sel.appendChild(o);
+});
+document.getElementById('f-fecha').value = new Date().toISOString().slice(0,10);
+
+function onSpecies(){
+  const v=document.getElementById('f-esp').value;
+  const cn=document.getElementById('f-cn');
+  const fam=document.getElementById('f-fam');
+  if(v===''){cn.value='';fam.value='';cn.classList.remove('autofill');fam.classList.remove('autofill');}
+  else{const s=SP[+v];cn.value=s.cn;fam.value=s.fam;cn.classList.add('autofill');fam.classList.add('autofill');}
+}
+
+// Photos
+function triggerPhoto(){ document.getElementById('file-input').click(); }
+function handlePhotos(e){
+  const files=Array.from(e.target.files);
+  files.forEach(f=>{
+    const r=new FileReader();
+    r.onload=ev=>{
+      currentPhotos.push({dataUrl:ev.target.result, name:f.name});
+      renderPhotoGrid();
+    };
+    r.readAsDataURL(f);
+  });
+  e.target.value='';
+}
+function removePhoto(i){
+  currentPhotos.splice(i,1);
+  renderPhotoGrid();
+}
+function renderPhotoGrid(){
+  const g=document.getElementById('photo-grid');
+  g.innerHTML='';
+  currentPhotos.forEach((p,i)=>{
+    g.innerHTML+=`<div class="photo-thumb">
+      <img src="${p.dataUrl}" />
+      <button class="del-photo" onclick="removePhoto(${i})">✕</button>
+    </div>`;
+  });
+  g.innerHTML+=`<div class="add-photo-btn" onclick="triggerPhoto()">
+    <span class="icon">📷</span><span>Agregar</span>
+  </div>`;
+  const pc=document.getElementById('photo-count');
+  pc.textContent=currentPhotos.length>0?`${currentPhotos.length} foto${currentPhotos.length>1?'s':''} adjunta${currentPhotos.length>1?'s':''}` :'';
+}
+
+function getForm(){
+  const ei=document.getElementById('f-esp').value;
+  return {
+    id: Date.now(),
+    fecha:    document.getElementById('f-fecha').value,
+    area:     document.getElementById('f-area').value,
+    cob:      document.getElementById('f-cob').value,
+    este:     document.getElementById('f-este').value,
+    norte:    document.getElementById('f-norte').value,
+    espIdx:   ei,
+    especie:  ei!==''?SP[+ei].sci:'',
+    cn:       document.getElementById('f-cn').value,
+    fam:      document.getElementById('f-fam').value,
+    arbol:    document.getElementById('f-arbol').value.trim(),
+    est:      document.getElementById('f-est').value,
+    abun:     document.getElementById('f-abun').value,
+    san:      document.getElementById('f-san').value,
+    proc:     document.getElementById('f-proc').value,
+    met:      document.getElementById('f-met').value,
+    photos:   currentPhotos.map(p=>p.dataUrl),
+  };
+}
+
+function saveRecord(){
+  const d=getForm();
+  if(!d.fecha){showToast('⚠ Ingresa la fecha');return;}
+  if(d.espIdx===''){showToast('⚠ Selecciona una especie');return;}
+  records.push(d);
+  saveLS(); resetForm(); renderRecords(); updateBadge(); updateBottomCount();
+  showToast('✓ Registro guardado');
+  showPage('records');
+}
+
+function deleteRecord(id){
+  records=records.filter(r=>r.id!==id);
+  saveLS(); renderRecords(); updateBadge(); updateBottomCount();
+  showToast('Registro eliminado');
+}
+
+function saveLS(){
+  try{ localStorage.setItem('himen_v2', JSON.stringify(records)); }catch(e){}
+  updateBottomCount();
+}
+function updateBottomCount(){
+  const el=document.getElementById('bc-num');
+  if(el) el.textContent=records.length;
+}
+
+function resetForm(){
+  ['f-fecha','f-area','f-cob','f-este','f-norte','f-esp','f-arbol',
+   'f-est','f-abun','f-san','f-proc','f-met'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.value = id==='f-fecha' ? new Date().toISOString().slice(0,10) : '';
+  });
+  ['f-cn','f-fam'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.value=''; el.classList.remove('autofill');
+  });
+  currentPhotos=[];
+  renderPhotoGrid();
+}
+
+function renderRecords(){
+  const list=document.getElementById('records-list');
+  const cnt=document.getElementById('rec-count');
+  cnt.textContent=records.length+' registro'+(records.length!==1?'s':'');
+  if(records.length===0){
+    list.innerHTML=`<div class="empty-state"><div class="icon">🐝</div><p>Sin registros aún.<br>Usa el formulario para agregar el primero.</p></div>`;
+    return;
+  }
+  list.innerHTML=records.slice().reverse().map((r,ri)=>{
+    const n=records.length-ri;
+    const v=(x,cls='')=>x?`<span class="rv ${cls}">${x}</span>`:`<span class="rv empty">—</span>`;
+    const photos=r.photos&&r.photos.length?`<div class="rec-photos">${r.photos.map(p=>`<img class="rec-photo" src="${p}">`).join('')}</div>`:'';
+    return `<div class="record-card">
+      <div class="record-head">
+        <span class="record-num"># ${n}</span>
+        <span class="record-date">${r.fecha||'—'}</span>
+        <button class="record-del" onclick="deleteRecord(${r.id})">✕</button>
+      </div>
+      <div class="record-body">
+        <div class="rf full"><span class="rl">Especie</span>${v(r.especie,'sci')}</div>
+        <div class="rf"><span class="rl">Nombre común</span>${v(r.cn)}</div>
+        <div class="rf"><span class="rl">Familia</span>${v(r.fam)}</div>
+        <div class="rf"><span class="rl">Área</span>${v(r.area)}</div>
+        <div class="rf"><span class="rl">Cobertura</span>${v(r.cob)}</div>
+        <div class="rf"><span class="rl">Este</span>${v(r.este)}</div>
+        <div class="rf"><span class="rl">Norte</span>${v(r.norte)}</div>
+        <div class="rf"><span class="rl">ID Árbol</span>${v(r.arbol)}</div>
+        <div class="rf"><span class="rl">Estructura</span>${v(r.est)}</div>
+        <div class="rf"><span class="rl">Abundancia</span>${v(r.abun)}</div>
+        <div class="rf"><span class="rl">Estado sanitario</span>${v(r.san)}</div>
+        <div class="rf full"><span class="rl">Procedimiento</span>${v(r.proc)}</div>
+        <div class="rf"><span class="rl">Método</span>${v(r.met)}</div>
+        <div class="rf"><span class="rl">Fotos</span>${v(r.photos&&r.photos.length?r.photos.length+' foto'+(r.photos.length>1?'s':''):'')}</div>
+      </div>
+      ${photos}
+    </div>`;
+  }).join('');
+}
+
+function updateBadge(){
+  const b=document.getElementById('badge');
+  if(records.length>0){b.textContent=records.length;b.style.display='inline';}
+  else b.style.display='none';
+}
+
+function showPage(name){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  if(name==='form') document.querySelectorAll('.tab')[0].classList.add('active');
+  else{ document.querySelectorAll('.tab')[1].classList.add('active'); renderRecords(); }
+}
+
+function exportXLSX(){
+  if(records.length===0){showToast('No hay registros para exportar');return;}
+  showToast('Generando Excel...');
+
+  const hdrs=['#','Fecha','Área de Labores','Cobertura','Este','Norte',
+    'Especie','Nombre Común','Familia','ID Árbol','Estructura','Abundancia',
+    'Estado Sanitario','Procedimiento','Método','N° Fotos'];
+
+  const mainRows=[
+    {cells: hdrs.map(h=>({v:h, t:'h'}))},
+    ...records.map((r,i)=>({cells:[
+      {v:i+1,t:'n'},{v:r.fecha},{v:r.area},{v:r.cob},
+      {v:r.este||'',t:'n'},{v:r.norte||'',t:'n'},
+      {v:r.especie},{v:r.cn},{v:r.fam},{v:r.arbol},
+      {v:r.est},{v:r.abun||'',t:'n'},{v:r.san},{v:r.proc},{v:r.met},
+      {v:(r.photos&&r.photos.length)||0,t:'n'}
+    ]}))
+  ];
+
+  const refHdr=['Nombre Científico','Nombre Común','Familia'];
+  const refRows=[
+    {cells: refHdr.map(h=>({v:h,t:'b'}))},
+    ...SP.map(s=>({cells:[{v:s.sci},{v:s.cn},{v:s.fam}]}))
+  ];
+
+  try {
+    const blob = buildXlsxFile([
+      {name:'Registros', rows:mainRows},
+      {name:'Referencia Especies', rows:refRows}
+    ]);
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;
+    a.download=`himenopteros_${new Date().toISOString().slice(0,10)}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000);
+    showToast('✅ Excel descargado');
+  } catch(err){
+    console.error(err);
+    showToast('Error al generar Excel: '+err.message);
+  }
+}
+
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2400);
+}
+
+renderRecords(); updateBadge(); updateBottomCount();
+</script>
+<div class="bottom-bar">
+  <div class="bottom-count" onclick="showPage('records');updateBadge();">
+    <div class="bc-num" id="bc-num">0</div>
+    <div class="bc-lbl">Guardados</div>
+  </div>
+  <button class="bottom-save" onclick="exportXLSX()">
+    💾 Guardar copia Excel
+  </button>
+</div>
+
+<script>
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  document.getElementById('install-banner').style.display = 'block';
+});
+function installApp(){
+  if(!deferredPrompt) return;
+  deferredPrompt.prompt();
+  deferredPrompt.userChoice.then(()=>{ deferredPrompt=null; document.getElementById('install-banner').style.display='none'; });
+}
+window.addEventListener('appinstalled', ()=>{
+  document.getElementById('install-banner').style.display='none';
+  showToast('✅ App instalada correctamente');
+});
+</script>
+</body>
+</html>
