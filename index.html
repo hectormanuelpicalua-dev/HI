@@ -485,6 +485,26 @@ SP.forEach((s,i)=>{
   o.value=i; o.textContent=`${s.sci} · ${s.cn}`; sel.appendChild(o);
 });
 document.getElementById('f-fecha').value = new Date().toISOString().slice(0,10);
+  function obtenerUbicacion(){
+  const status = document.getElementById('gps-status');
+  if(!navigator.geolocation){
+    status.textContent = '⚠️ Tu dispositivo no soporta GPS';
+    return;
+  }
+  status.textContent = '⏳ Obteniendo ubicación...';
+  navigator.geolocation.getCurrentPosition(
+    function(pos){
+      document.getElementById('f-este').value = pos.coords.longitude.toFixed(6);
+      document.getElementById('f-norte').value = pos.coords.latitude.toFixed(6);
+      status.textContent = '✓ Coordenadas obtenidas correctamente';
+      setTimeout(()=>status.textContent='', 3000);
+    },
+    function(err){
+      status.textContent = '⚠️ No se pudo obtener la ubicación';
+    },
+    {enableHighAccuracy:true, timeout:10000}
+  );
+}
 
 function onSpecies(){
   const v=document.getElementById('f-esp').value;
