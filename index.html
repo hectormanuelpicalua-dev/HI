@@ -12,47 +12,32 @@
   <link rel="apple-touch-icon" href="icon-192.png">
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script>
-
-// ============================================================
-// Minimal XLSX exporter — pure JS, zero dependencies
-// Builds a real .xlsx (ZIP+XML) file in the browser
-// ============================================================
 (function(global){
-
-// ---- tiny CRC32 ----
 const crcTable=(()=>{const t=new Uint32Array(256);for(let i=0;i<256;i++){let c=i;for(let j=0;j<8;j++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[i]=c;}return t;})();
 function crc32(buf,off=0,len=buf.length){let c=0xFFFFFFFF;for(let i=off;i<off+len;i++)c=crcTable[(c^buf[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0;}
-
 function strBytes(s){const e=new TextEncoder();return e.encode(s);}
 function u16le(n){return[n&0xFF,(n>>8)&0xFF];}
 function u32le(n){return[n&0xFF,(n>>8)&0xFF,(n>>16)&0xFF,(n>>24)&0xFF];}
 function concat(...arrs){const total=arrs.reduce((s,a)=>s+a.length,0);const out=new Uint8Array(total);let off=0;for(const a of arrs){out.set(a,off);off+=a.length;}return out;}
-
-function deflateRaw(data){
-  // Use DecompressionStream trick to get deflate — not available everywhere.
-  // Use store (no compression) for simplicity and reliability.
-  return {data, method:0, crc:crc32(data)};
-}
-
+function deflateRaw(data){return {data, method:0, crc:crc32(data)};}
 function zipEntry(name,content){
   const nameB=strBytes(name);
   const {data, method, crc}=deflateRaw(content);
   const local=concat(
-    new Uint8Array([0x50,0x4B,0x03,0x04]), // sig
-    new Uint8Array([0x14,0x00]),             // version
-    new Uint8Array([0x00,0x00]),             // flags
-    new Uint8Array(u16le(method)),           // method: store
-    new Uint8Array([0x00,0x00,0x00,0x00]),   // mod time/date
+    new Uint8Array([0x50,0x4B,0x03,0x04]),
+    new Uint8Array([0x14,0x00]),
+    new Uint8Array([0x00,0x00]),
+    new Uint8Array(u16le(method)),
+    new Uint8Array([0x00,0x00,0x00,0x00]),
     new Uint8Array(u32le(crc)),
     new Uint8Array(u32le(data.length)),
     new Uint8Array(u32le(data.length)),
     new Uint8Array(u16le(nameB.length)),
-    new Uint8Array([0x00,0x00]),             // extra len
+    new Uint8Array([0x00,0x00]),
     nameB, data
   );
   return {local, nameB, method, crc, size:data.length, compSize:data.length};
 }
-
 function buildZip(files){
   const entries=[]; let offset=0; const parts=[];
   for(const [name,content] of files){
@@ -74,7 +59,7 @@ function buildZip(files){
       new Uint8Array(u32le(e.compSize)),
       new Uint8Array(u32le(e.size)),
       new Uint8Array(u16le(e.nameB.length)),
-      new Uint8Array(10), // extra+comment+disk+attr
+      new Uint8Array(10),
       new Uint8Array([0x00,0x00]),
       new Uint8Array(u32le(e.offset)),
       e.nameB
@@ -92,41 +77,22 @@ function buildZip(files){
   );
   return concat(...parts,...cdParts,eocd);
 }
-
-// ---- XML helpers ----
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-
 function buildXlsx(sheetsData){
-  // sheetsData = [{name, rows:[{cells:[{v,t}]}]}]
-  // t: 's'=string, 'n'=number, 'b'=bold header
-
-  // Shared strings
   const sst=[]; const sstMap={};
   function getSST(s){const k=String(s??'');if(sstMap[k]===undefined){sstMap[k]=sst.length;sst.push(k);}return sstMap[k];}
-
-  // Pre-scan strings
   for(const sh of sheetsData)
     for(const row of sh.rows)
       for(const cell of row.cells)
         if(cell.t!=='n'&&cell.v!==undefined&&cell.v!=='') getSST(cell.v);
-
   const sstXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sst.length}" uniqueCount="${sst.length}">
 ${sst.map(s=>`<si><t xml:space="preserve">${esc(s)}</t></si>`).join('\n')}
 </sst>`;
-
-  // Styles (minimal: 0=normal, 1=bold header, 2=date)
   const stylesXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="2">
-    <font><sz val="9"/><name val="Arial"/></font>
-    <font><b/><sz val="9"/><name val="Arial"/></font>
-  </fonts>
-  <fills count="3">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF2D5A3D"/></patternFill></fill>
-  </fills>
+  <fonts count="2"><font><sz val="9"/><name val="Arial"/></font><font><b/><sz val="9"/><name val="Arial"/></font></fonts>
+  <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2D5A3D"/></patternFill></fill></fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
   <cellXfs count="3">
@@ -135,14 +101,10 @@ ${sst.map(s=>`<si><t xml:space="preserve">${esc(s)}</t></si>`).join('\n')}
     <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>
   </cellXfs>
 </styleSheet>`;
-
   function colLetter(n){let s='';n++;while(n>0){n--;s=String.fromCharCode(65+(n%26))+s;n=Math.floor(n/26);}return s;}
-
   const sheetXmls=[];
   for(const sh of sheetsData){
-    let xml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<sheetData>`;
+    let xml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">\n<sheetData>`;
     sh.rows.forEach((row,ri)=>{
       xml+=`<row r="${ri+1}">`;
       row.cells.forEach((cell,ci)=>{
@@ -161,27 +123,20 @@ ${sst.map(s=>`<si><t xml:space="preserve">${esc(s)}</t></si>`).join('\n')}
     xml+=`</sheetData></worksheet>`;
     sheetXmls.push(xml);
   }
-
   const wbXml=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets>
-${sheetsData.map((sh,i)=>`<sheet name="${esc(sh.name)}" sheetId="${i+1}" r:id="rId${i+2}"/>`).join('\n')}
-</sheets>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>${sheetsData.map((sh,i)=>`<sheet name="${esc(sh.name)}" sheetId="${i+1}" r:id="rId${i+2}"/>`).join('')}</sheets>
 </workbook>`;
-
   const wbRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
   <Relationship Id="rId2000" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 ${sheetsData.map((sh,i)=>`  <Relationship Id="rId${i+2}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`).join('\n')}
 </Relationships>`;
-
   const rootRels=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>`;
-
   const contentTypes=`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -191,7 +146,6 @@ ${sheetsData.map((sh,i)=>`  <Relationship Id="rId${i+2}" Type="http://schemas.op
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
 ${sheetsData.map((sh,i)=>`  <Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n')}
 </Types>`;
-
   const enc=s=>strBytes(s);
   const files=[
     ['[Content_Types].xml', enc(contentTypes)],
@@ -204,15 +158,11 @@ ${sheetsData.map((sh,i)=>`  <Override PartName="/xl/worksheets/sheet${i+1}.xml" 
   ];
   return buildZip(files);
 }
-
 global.buildXlsxFile = function(sheetsData){
   const bytes=buildXlsx(sheetsData);
-  const blob=new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-  return blob;
+  return new Blob([bytes],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
 };
-
 })(window);
-
 </script>
 <style>
 :root {
@@ -225,7 +175,6 @@ global.buildXlsxFile = function(sheetsData){
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);padding-bottom:90px}
-
 .header{background:var(--green);padding:18px 16px 0;position:sticky;top:0;z-index:100;box-shadow:0 2px 14px rgba(0,0,0,.2)}
 .header h1{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:800;color:#fff;display:flex;align-items:center;gap:8px}
 .header-sub{color:#a8c9b2;font-size:.7rem;margin-top:2px;letter-spacing:.05em}
@@ -233,10 +182,8 @@ body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);paddi
 .tab{flex:1;background:rgba(255,255,255,.12);border:none;border-radius:8px 8px 0 0;color:rgba(255,255,255,.7);font-family:'Inter',sans-serif;font-size:.78rem;font-weight:600;padding:10px 6px;cursor:pointer;position:relative;transition:all .2s}
 .tab.active{background:#fff;color:var(--green)}
 .tab .badge{position:absolute;top:-4px;right:-4px;background:var(--amber);color:#fff;border-radius:10px;font-size:.6rem;font-weight:700;padding:1px 6px;min-width:18px;text-align:center}
-
 .page{display:none;padding:14px}
 .page.active{display:block}
-
 .form-card{background:var(--white);border-radius:14px;border:1.5px solid var(--border);overflow:hidden;margin-bottom:12px}
 .sec-hdr{color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.76rem;padding:9px 14px;letter-spacing:.06em;text-transform:uppercase;display:flex;align-items:center;gap:7px}
 .sec-hdr.green{background:var(--green)}
@@ -246,7 +193,6 @@ body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);paddi
 .sec-hdr.blue{background:var(--blue)}
 .sec-hdr.brown{background:#4A2C0A}
 .sec-hdr.photo{background:#5D4037}
-
 .field{display:flex;flex-direction:column;padding:12px 14px;border-bottom:1px solid #EDE8DE}
 .field:last-child{border-bottom:none}
 .field label{font-size:.68rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
@@ -257,8 +203,9 @@ body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);paddi
 .field.two-col>div{flex:1;display:flex;flex-direction:column;gap:6px}
 .field.two-col>div label{font-size:.68rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
 .autofill{background:var(--green-pale)!important;border-color:var(--green2)!important;color:var(--green)!important;font-weight:600!important}
-
-/* Photos */
+.gps-btn{width:100%;background:var(--blue);color:#fff;font-family:'Inter',sans-serif;font-size:.9rem;font-weight:700;border:none;border-radius:10px;padding:13px;cursor:pointer;transition:all .2s}
+.gps-btn:active{background:#0f3460}
+.gps-status{font-size:.72rem;color:var(--muted);margin-top:6px;text-align:center;min-height:16px}
 .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px 14px}
 .photo-thumb{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;border:1.5px solid var(--border);background:#f0ece0;cursor:pointer}
 .photo-thumb img{width:100%;height:100%;object-fit:cover}
@@ -267,17 +214,14 @@ body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);paddi
 .add-photo-btn:active{background:var(--green-pale);border-color:var(--green2)}
 .add-photo-btn .icon{font-size:1.6rem}
 .photo-count{font-size:.72rem;color:var(--muted);padding:0 14px 10px;font-style:italic}
-
 .save-btn{width:100%;background:var(--green);color:#fff;font-family:'Syne',sans-serif;font-size:1rem;font-weight:800;border:none;border-radius:14px;padding:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;margin-top:6px;transition:all .2s;box-shadow:0 4px 16px rgba(45,90,61,.25);letter-spacing:.03em}
 .save-btn:active{transform:scale(.97);background:#234A31}
 .reset-btn{width:100%;background:transparent;color:var(--muted);font-family:'Inter',sans-serif;font-size:.84rem;font-weight:600;border:1.5px solid var(--border);border-radius:14px;padding:13px;cursor:pointer;margin-top:10px;transition:all .2s}
 .reset-btn:active{background:#EDE8DE}
-
 .records-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px}
 .records-count{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;color:var(--green)}
 .export-btn{background:var(--amber);color:#fff;font-family:'Inter',sans-serif;font-size:.8rem;font-weight:700;border:none;border-radius:10px;padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:all .2s}
 .export-btn:active{transform:scale(.96)}
-
 .record-card{background:var(--white);border:1.5px solid var(--border);border-radius:14px;margin-bottom:10px;overflow:hidden}
 .record-head{background:var(--green-pale);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .record-num{font-family:'Syne',sans-serif;font-weight:800;font-size:.85rem;color:var(--green)}
@@ -292,18 +236,15 @@ body{background:var(--bg);font-family:'Inter',sans-serif;color:var(--text);paddi
 .rf.full{grid-column:span 2}
 .rec-photos{display:flex;gap:6px;overflow-x:auto;padding:0 14px 12px}
 .rec-photo{width:56px;height:56px;border-radius:8px;object-fit:cover;border:1.5px solid var(--border);flex-shrink:0}
-
 .empty-state{text-align:center;padding:50px 20px;color:var(--muted)}
 .empty-state .icon{font-size:3rem;margin-bottom:12px}
 .empty-state p{font-size:.9rem;line-height:1.5}
-
 .toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(120px);background:var(--green);color:#fff;font-family:'Inter',sans-serif;font-size:.88rem;font-weight:600;padding:13px 24px;border-radius:50px;white-space:nowrap;transition:transform .3s cubic-bezier(.34,1.56,.64,1);z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.2);pointer-events:none}
 .toast.show{transform:translateX(-50%) translateY(0)}
 .bottom-bar{position:fixed;bottom:0;left:0;right:0;z-index:200;background:var(--white);border-top:2px solid var(--border);padding:10px 14px;display:flex;align-items:center;gap:10px;box-shadow:0 -4px 20px rgba(0,0,0,.12)}
 .bottom-save{flex:1;background:var(--amber);color:#fff;font-family:'Syne',sans-serif;font-size:.95rem;font-weight:800;border:none;border-radius:12px;padding:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all .2s;letter-spacing:.02em;box-shadow:0 3px 12px rgba(201,146,42,.35)}
 .bottom-save:active{transform:scale(.97);background:#a87820}
 .bottom-count{background:var(--green-pale);border:1.5px solid var(--border);border-radius:12px;padding:10px 14px;text-align:center;min-width:68px;cursor:pointer}
-.bottom-count:active{background:var(--green-pale)}
 .bc-num{font-family:'Syne',sans-serif;font-weight:800;font-size:1.1rem;color:var(--green);line-height:1}
 .bc-lbl{font-size:.58rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 </style>
@@ -318,7 +259,6 @@ if('serviceWorker' in navigator){
 </script>
 </head>
 <body>
-<!-- PWA Install Banner -->
 <div id="install-banner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#C9922A;color:#fff;padding:12px 16px;font-family:'Inter',sans-serif;font-size:.85rem;font-weight:600;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.2)">
   📲 Instala esta app en tu celular para usarla sin internet
   <button onclick="installApp()" style="margin-left:10px;background:#fff;color:#C9922A;border:none;border-radius:8px;padding:6px 14px;font-weight:700;cursor:pointer;font-size:.82rem">Instalar</button>
@@ -334,7 +274,6 @@ if('serviceWorker' in navigator){
   </div>
 </div>
 
-<!-- FORM -->
 <div class="page active" id="page-form">
 
   <div class="form-card">
@@ -364,14 +303,13 @@ if('serviceWorker' in navigator){
     <div class="field two-col">
       <div><label>Este</label><input type="number" id="f-este" placeholder="000000" inputmode="numeric"/></div>
       <div><label>Norte</label><input type="number" id="f-norte" placeholder="000000" inputmode="numeric"/></div>
-      </div>
+    </div>
     <div class="field">
-      <button type="button" onclick="obtenerUbicacion()" style="width:100%;background:#1A5276;color:#fff;font-family:'Inter',sans-serif;font-size:.9rem;font-weight:700;border:none;border-radius:10px;padding:13px;cursor:pointer;">
-        📍 Obtener coordenadas automáticas
-      </button>
-      <div id="gps-status" style="...></div>
+      <button class="gps-btn" onclick="obtenerUbicacion()">📍 Obtener coordenadas automáticas</button>
+      <div class="gps-status" id="gps-status"></div>
     </div>
-    </div>
+  </div>
+  div class="form-card">
     <div class="sec-hdr amber">🔬 Taxonomía</div>
     <div class="field">
       <label>Especie (nombre científico)</label>
@@ -442,7 +380,6 @@ if('serviceWorker' in navigator){
   <button class="reset-btn" onclick="resetForm()">Limpiar formulario</button>
 </div>
 
-<!-- RECORDS -->
 <div class="page" id="page-records">
   <div class="records-top">
     <div class="records-count" id="rec-count">0 registros</div>
@@ -472,18 +409,18 @@ const SP = [
 ];
 
 let records = [];
-let currentPhotos = []; // array of {dataUrl, name}
+let currentPhotos = [];
 
 try { records = JSON.parse(localStorage.getItem('himen_v2') || '[]'); } catch(e){}
 
-// Build species select
 const sel = document.getElementById('f-esp');
 SP.forEach((s,i)=>{
   const o=document.createElement('option');
   o.value=i; o.textContent=`${s.sci} · ${s.cn}`; sel.appendChild(o);
 });
 document.getElementById('f-fecha').value = new Date().toISOString().slice(0,10);
-  function obtenerUbicacion(){
+
+function obtenerUbicacion(){
   const status = document.getElementById('gps-status');
   if(!navigator.geolocation){
     status.textContent = '⚠️ Tu dispositivo no soporta GPS';
@@ -494,11 +431,11 @@ document.getElementById('f-fecha').value = new Date().toISOString().slice(0,10);
     function(pos){
       document.getElementById('f-este').value = pos.coords.longitude.toFixed(6);
       document.getElementById('f-norte').value = pos.coords.latitude.toFixed(6);
-      status.textContent = '✓ Coordenadas obtenidas correctamente';
+      status.textContent = '✅ Coordenadas obtenidas correctamente';
       setTimeout(()=>status.textContent='', 3000);
     },
     function(err){
-      status.textContent = '⚠️ No se pudo obtener la ubicación';
+      status.textContent = '⚠️ No se pudo obtener la ubicación. Verifica los permisos.';
     },
     {enableHighAccuracy:true, timeout:10000}
   );
@@ -512,7 +449,6 @@ function onSpecies(){
   else{const s=SP[+v];cn.value=s.cn;fam.value=s.fam;cn.classList.add('autofill');fam.classList.add('autofill');}
 }
 
-// Photos
 function triggerPhoto(){ document.getElementById('file-input').click(); }
 function handlePhotos(e){
   const files=Array.from(e.target.files);
@@ -534,14 +470,9 @@ function renderPhotoGrid(){
   const g=document.getElementById('photo-grid');
   g.innerHTML='';
   currentPhotos.forEach((p,i)=>{
-    g.innerHTML+=`<div class="photo-thumb">
-      <img src="${p.dataUrl}" />
-      <button class="del-photo" onclick="removePhoto(${i})">✕</button>
-    </div>`;
+    g.innerHTML+=`<div class="photo-thumb"><img src="${p.dataUrl}" /><button class="del-photo" onclick="removePhoto(${i})">✕</button></div>`;
   });
-  g.innerHTML+=`<div class="add-photo-btn" onclick="triggerPhoto()">
-    <span class="icon">📷</span><span>Agregar</span>
-  </div>`;
+  g.innerHTML+=`<div class="add-photo-btn" onclick="triggerPhoto()"><span class="icon">📷</span><span>Agregar</span></div>`;
   const pc=document.getElementById('photo-count');
   pc.textContent=currentPhotos.length>0?`${currentPhotos.length} foto${currentPhotos.length>1?'s':''} adjunta${currentPhotos.length>1?'s':''}` :'';
 }
@@ -604,6 +535,7 @@ function resetForm(){
     const el=document.getElementById(id);
     el.value=''; el.classList.remove('autofill');
   });
+  document.getElementById('gps-status').textContent='';
   currentPhotos=[];
   renderPhotoGrid();
 }
@@ -664,11 +596,9 @@ function showPage(name){
 function exportXLSX(){
   if(records.length===0){showToast('No hay registros para exportar');return;}
   showToast('Generando Excel...');
-
   const hdrs=['#','Fecha','Área de Labores','Cobertura','Este','Norte',
     'Especie','Nombre Común','Familia','ID Árbol','Estructura','Abundancia',
     'Estado Sanitario','Procedimiento','Método','N° Fotos'];
-
   const mainRows=[
     {cells: hdrs.map(h=>({v:h, t:'h'}))},
     ...records.map((r,i)=>({cells:[
@@ -679,13 +609,11 @@ function exportXLSX(){
       {v:(r.photos&&r.photos.length)||0,t:'n'}
     ]}))
   ];
-
   const refHdr=['Nombre Científico','Nombre Común','Familia'];
   const refRows=[
     {cells: refHdr.map(h=>({v:h,t:'b'}))},
     ...SP.map(s=>({cells:[{v:s.sci},{v:s.cn},{v:s.fam}]}))
   ];
-
   try {
     const blob = buildXlsxFile([
       {name:'Registros', rows:mainRows},
@@ -693,10 +621,8 @@ function exportXLSX(){
     ]);
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
-    a.href=url;
-    a.download=`himenopteros_${new Date().toISOString().slice(0,10)}.xlsx`;
-    document.body.appendChild(a);
-    a.click();
+    a.href=url; a.download=`himenopteros_${new Date().toISOString().slice(0,10)}.xlsx`;
+    document.body.appendChild(a); a.click();
     setTimeout(()=>{URL.revokeObjectURL(url);a.remove();},1000);
     showToast('✅ Excel descargado');
   } catch(err){
@@ -713,6 +639,7 @@ function showToast(msg){
 
 renderRecords(); updateBadge(); updateBottomCount();
 </script>
+
 <div class="bottom-bar">
   <div class="bottom-count" onclick="showPage('records');updateBadge();">
     <div class="bc-num" id="bc-num">0</div>
