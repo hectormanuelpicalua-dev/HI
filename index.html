@@ -309,7 +309,8 @@ if('serviceWorker' in navigator){
       <div class="gps-status" id="gps-status"></div>
     </div>
   </div>
-  div class="form-card">
+
+  <div class="form-card">
     <div class="sec-hdr amber">🔬 Taxonomía</div>
     <div class="field">
       <label>Especie (nombre científico)</label>
@@ -420,6 +421,42 @@ SP.forEach((s,i)=>{
 });
 document.getElementById('f-fecha').value = new Date().toISOString().slice(0,10);
 
+function geoToMagnaSirgas(lat, lon) {
+  // Conversión de WGS84 (lat/lon) a MAGNA-SIRGAS EPSG:9377
+  // Origen Nacional Colombia
+  const a = 6378137.0;
+  const f = 1 / 298.257222101;
+  const b = a * (1 - f);
+  const e2 = (a * a - b * b) / (a * a);
+  const e = Math.sqrt(e2);
+
+  const lat0 = 4.0 * Math.PI / 180.0;
+  const lon0 = -73.0 * Math.PI / 180.0;
+  const k0 = 0.9992;
+  const FE = 5000000.0;
+  const FN = 2000000.0;
+
+  const latR = lat * Math.PI / 180.0;
+  const lonR = lon * Math.PI / 180.0;
+
+  const N = a / Math.sqrt(1 - e2 * Math.sin(latR) * Math.sin(latR));
+  const T = Math.tan(latR) * Math.tan(latR);
+  const C = (e2 / (1 - e2)) * Math.cos(latR) * Math.cos(latR);
+  const A = Math.cos(latR) * (lonR - lon0);
+
+  function M(phi) {
+    return a * ((1 - e2/4 - 3*e2*e2/64 - 5*e2*e2*e2/256) * phi
+      - (3*e2/8 + 3*e2*e2/32 + 45*e2*e2*e2/1024) * Math.sin(2*phi)
+      + (15*e2*e2/256 + 45*e2*e2*e2/1024) * Math.sin(4*phi)
+      - (35*e2*e2*e2/3072) * Math.sin(6*phi));
+  }
+
+  const x = FE + k0 * N * (A + (1-T+C)*A*A*A/6 + (5-18*T+T*T+72*C-58*(e2/(1-e2)))*A*A*A*A*A/120);
+  const y = FN + k0 * (M(latR) - M(lat0) + N*Math.tan(latR)*(A*A/2 + (5-T+9*C+4*C*C)*A*A*A*A/24 + (61-58*T+T*T+600*C-330*(e2/(1-e2)))*A*A*A*A*A*A/720));
+
+  return { este: Math.round(x), norte: Math.round(y) };
+}
+
 function obtenerUbicacion(){
   const status = document.getElementById('gps-status');
   if(!navigator.geolocation){
@@ -429,9 +466,10 @@ function obtenerUbicacion(){
   status.textContent = '⏳ Obteniendo ubicación...';
   navigator.geolocation.getCurrentPosition(
     function(pos){
-      document.getElementById('f-este').value = pos.coords.longitude.toFixed(6);
-      document.getElementById('f-norte').value = pos.coords.latitude.toFixed(6);
-      status.textContent = '✅ Coordenadas obtenidas correctamente';
+      const coords = geoToMagnaSirgas(pos.coords.latitude, pos.coords.longitude);
+      document.getElementById('f-este').value = coords.este;
+      document.getElementById('f-norte').value = coords.norte;
+      status.textContent = '✅ MAGNA-SIRGAS EPSG:9377 obtenido';
       setTimeout(()=>status.textContent='', 3000);
     },
     function(err){
